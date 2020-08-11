@@ -757,9 +757,10 @@ asynchronous call into synchronous.")
                           (company-candidates
                            (:eval
                             (if (consp company-backend)
-                                (company--group-lighter (nth company-selection
-                                                             company-candidates)
-                                                        company-lighter-base)
+                                (when company-selection
+                                  (company--group-lighter (nth company-selection
+                                                               company-candidates)
+                                                          company-lighter-base))
                               (symbol-name company-backend)))
                            company-lighter-base))
   "Mode line lighter for Company.
@@ -1108,7 +1109,9 @@ matches IDLE-BEGIN-AFTER-RE, return it wrapped in a cons."
 
 (defvar-local company-common nil)
 
-(defvar-local company-selection 0)
+(defvar company-selection-default 0
+  "The default value for `company-selection'.")
+(defvar-local company-selection company-selection-default)
 
 (defvar-local company-selection-changed nil)
 
@@ -1191,11 +1194,19 @@ can retrieve meta-data for them."
       (error (error "Company: frontend %s error \"%s\" on command %s"
                     frontend (error-message-string err) command)))))
 
+(defun company--calc-selection (selection)
+  "Calculate the correct selection from passed SELECTION.
+Respect `company-selection-wrap-around'."
+  (when selection
+    (if (and (<= 0 selection) (< selection company-candidates-length))
+        selection
+      (if company-selection-wrap-around
+          (mod selection company-candidates-length)
+        (setq selection (min (1- company-candidates-length) selection))
+        (if (< selection 0) company-selection-default selection)))))
+
 (defun company-set-selection (selection &optional force-update)
-  (setq selection
-        (if company-selection-wrap-around
-            (mod selection company-candidates-length)
-          (max 0 (min (1- company-candidates-length) selection))))
+  (setq selection (company--calc-selection selection))
   (when (or force-update (not (equal selection company-selection)))
     (setq company-selection selection
           company-selection-changed t)
@@ -1214,10 +1225,11 @@ can retrieve meta-data for them."
   (setq company-candidates-length (length candidates))
   (if company-selection-changed
       ;; Try to restore the selection
-      (let ((selected (nth company-selection company-candidates)))
-        (setq company-selection 0
-              company-candidates candidates)
+      (let ((selected (and company-selection
+                           (nth company-selection company-candidates))))
+        (setq company-candidates candidates)
         (when selected
+          (setq company-selection 0)
           (catch 'found
             (while candidates
               (let ((candidate (pop candidates)))
@@ -1226,9 +1238,9 @@ can retrieve meta-data for them."
                                   (company-call-backend 'annotation selected)))
                   (throw 'found t)))
               (cl-incf company-selection))
-            (setq company-selection 0
+            (setq company-selection company-selection-default
                   company-selection-changed nil))))
-    (setq company-selection 0
+    (setq company-selection company-selection-default
           company-candidates candidates))
   ;; Calculate common.
   (let ((completion-ignore-case (company-call-backend 'ignore-case)))
@@ -1666,7 +1678,7 @@ prefix match (same case) will be prioritized."
           company-candidates-cache nil
           company-candidates-predicate nil
           company-common nil
-          company-selection 0
+          company-selection company-selection-default
           company-selection-changed nil
           company--manual-action nil
           company--manual-prefix nil
@@ -1871,11 +1883,12 @@ each one wraps a part of the input string."
     (company-update-candidates cc)))
 
 (defun company--search-update-string (new)
-  (let* ((pos (company--search new (nthcdr company-selection company-candidates))))
+  (let* ((selection (or company-selection 0))
+         (pos (company--search new (nthcdr selection company-candidates))))
     (if (null pos)
         (ding)
       (setq company-search-string new)
-      (company-set-selection (+ company-selection pos) t))))
+      (company-set-selection (+ selection pos) t))))
 
 (defun company--search-assert-input ()
   (company--search-assert-enabled)
@@ -1886,24 +1899,25 @@ each one wraps a part of the input string."
   "Repeat the incremental search in completion candidates forward."
   (interactive)
   (company--search-assert-input)
-  (let ((pos (company--search company-search-string
-                              (cdr (nthcdr company-selection
-                                           company-candidates)))))
+  (let* ((selection (or company-selection 0))
+         (pos (company--search company-search-string
+                              (cdr (nthcdr selection company-candidates)))))
     (if (null pos)
         (ding)
-      (company-set-selection (+ company-selection pos 1) t))))
+      (company-set-selection (+ selection pos 1) t))))
 
 (defun company-search-repeat-backward ()
   "Repeat the incremental search in completion candidates backwards."
   (interactive)
   (company--search-assert-input)
-  (let ((pos (company--search company-search-string
+  (let* ((selection (or company-selection 0))
+         (pos (company--search company-search-string
                               (nthcdr (- company-candidates-length
-                                         company-selection)
+                                         selection)
                                       (reverse company-candidates)))))
     (if (null pos)
         (ding)
-      (company-set-selection (- company-selection pos 1) t))))
+      (company-set-selection (- selection pos 1) t))))
 
 (defun company-search-toggle-filtering ()
   "Toggle `company-search-filtering'."
@@ -2041,10 +2055,27 @@ followed by `company-search-toggle-filtering'."
 (defun company-select-next (&optional arg)
   "Select the next candidate in the list.
 
-With ARG, move by that many elements."
+With ARG, move by that many elements.
+
+Possible state transitions:
+- (arg > 0) unselected -> first candidate selected
+- (arg < 0) first candidate selected -> default selection
+- (arg < 0 wrap-round) unselected -> last candidate selected
+- (arg < 0 no wrap-round) unselected -> unselected"
   (interactive "p")
   (when (company-manual-begin)
-    (company-set-selection (+ (or arg 1) company-selection))))
+    (let ((selection (if company-selection
+                         (+ (or arg 1) company-selection)
+                       (+ (or arg 1)
+                          (cond ((or (not arg) (> arg 0)) -1)
+                                (t 0))))))
+      ;; special case
+      (let ((company-selection-wrap-around t))
+        (when (and arg (< arg 0)
+                   (not (equal company-selection company-selection-default))
+                   (equal (company--calc-selection selection) (- company-candidates-length 1)))
+          (setq selection company-selection-default)))
+      (company-set-selection selection))))
 
 (defun company-select-previous (&optional arg)
   "Select the previous candidate in the list.
@@ -2153,7 +2184,7 @@ With ARG, move by that many elements."
 (defun company-complete-selection ()
   "Insert the selected candidate."
   (interactive)
-  (when (company-manual-begin)
+  (when (and (company-manual-begin) company-selection)
     (let ((result (nth company-selection company-candidates)))
       (company-finish result))))
 
@@ -2281,7 +2312,7 @@ character, stripping the modifiers.  That character must be a digit."
 (defvar-local company-last-metadata nil)
 
 (defun company-fetch-metadata ()
-  (let ((selected (nth company-selection company-candidates)))
+  (let ((selected (nth (or company-selection 0) company-candidates)))
     (unless (eq selected (car company-last-metadata))
       (setq company-last-metadata
             (cons selected (company-call-backend 'meta selected))))
@@ -2332,9 +2363,10 @@ character, stripping the modifiers.  That character must be a digit."
 (defun company-show-doc-buffer ()
   "Temporarily show the documentation buffer for the selection."
   (interactive)
-  (let (other-window-scroll-buffer)
+  (let ((other-window-scroll-buffer)
+        (selection (or company-selection 0)))
     (company--electric-do
-      (let* ((selected (nth company-selection company-candidates))
+      (let* ((selected (nth selection company-candidates))
              (doc-buffer (or (company-call-backend 'doc-buffer selected)
                              (user-error "No documentation available")))
              start)
@@ -2791,23 +2823,26 @@ If SHOW-VERSION is non-nil, show the version in the echo area."
     (when (< len (+ company-tooltip-offset limit))
       (setq company-tooltip-offset 0))
 
-    ;; Scroll to offset.
-    (if (eq company-tooltip-offset-display 'lines)
-        (setq limit (company-tooltip--lines-update-offset selection len limit))
-      (company-tooltip--simple-update-offset selection len limit))
+    (let ((selection (or selection 0)))
+      ;; Scroll to offset.
+      (if (eq company-tooltip-offset-display 'lines)
+          (setq limit (company-tooltip--lines-update-offset selection len limit))
+        (company-tooltip--simple-update-offset selection len limit))
 
-    (cond
-     ((eq company-tooltip-offset-display 'scrollbar)
-      (setq scrollbar-bounds (company--scrollbar-bounds company-tooltip-offset
-                                                        limit len)))
-     ((eq company-tooltip-offset-display 'lines)
-      (when (> company-tooltip-offset 0)
-        (setq previous (format "...(%d)" company-tooltip-offset)))
-      (setq remainder (- len limit company-tooltip-offset)
-            remainder (when (> remainder 0)
-                        (setq remainder (format "...(%d)" remainder))))))
+      (cond
+       ((eq company-tooltip-offset-display 'scrollbar)
+        (setq scrollbar-bounds (company--scrollbar-bounds company-tooltip-offset
+                                                          limit len)))
+       ((eq company-tooltip-offset-display 'lines)
+        (when (> company-tooltip-offset 0)
+          (setq previous (format "...(%d)" company-tooltip-offset)))
+        (setq remainder (- len limit company-tooltip-offset)
+              remainder (when (> remainder 0)
+                          (setq remainder (format "...(%d)" remainder)))))))
 
-    (cl-decf selection company-tooltip-offset)
+    (when selection
+      (cl-decf selection company-tooltip-offset))
+
     (setq width (max (length previous) (length remainder))
           lines (nthcdr company-tooltip-offset company-candidates)
           len (min limit len)
@@ -3114,8 +3149,10 @@ Delay is determined by `company-tooltip-idle-delay'."
   "`company-mode' frontend showing the selection as if it had been inserted."
   (pcase command
     (`pre-command (company-preview-hide))
-    (`post-command (company-preview-show-at-point (point)
-                                                  (nth company-selection company-candidates)))
+    (`post-command
+     (when company-selection
+       (company-preview-show-at-point (point)
+                                      (nth company-selection company-candidates))))
     (`hide (company-preview-hide))))
 
 (defun company-preview-if-just-one-frontend (command)
@@ -3191,59 +3228,59 @@ Delay is determined by `company-tooltip-idle-delay'."
         (run-with-idle-timer company-echo-delay nil 'company-echo-show getter)))
 
 (defun company-echo-format ()
+  (let ((selection (or company-selection 0)))
+    (let ((limit (window-body-width (minibuffer-window)))
+          (len -1)
+          ;; Roll to selection.
+          (candidates (nthcdr selection company-candidates))
+          (i (if company-show-numbers selection 99999))
+          comp msg)
 
-  (let ((limit (window-body-width (minibuffer-window)))
-        (len -1)
-        ;; Roll to selection.
-        (candidates (nthcdr company-selection company-candidates))
-        (i (if company-show-numbers company-selection 99999))
-        comp msg)
+      (while candidates
+        (setq comp (company-reformat (company--clean-string (pop candidates)))
+              len (+ len 1 (length comp)))
+        (if (< i 10)
+            ;; Add number.
+            (progn
+              (setq comp (propertize (format "%d: %s" i comp)
+                                     'face 'company-echo))
+              (cl-incf len 3)
+              (cl-incf i)
+              (add-text-properties 3 (+ 3 (string-width company-common))
+                                   '(face company-echo-common) comp))
+          (setq comp (propertize comp 'face 'company-echo))
+          (add-text-properties 0 (string-width company-common)
+                               '(face company-echo-common) comp))
+        (if (>= len limit)
+            (setq candidates nil)
+          (push comp msg)))
 
-    (while candidates
-      (setq comp (company-reformat (company--clean-string (pop candidates)))
-            len (+ len 1 (length comp)))
-      (if (< i 10)
-          ;; Add number.
-          (progn
-            (setq comp (propertize (format "%d: %s" i comp)
-                                   'face 'company-echo))
-            (cl-incf len 3)
-            (cl-incf i)
-            (add-text-properties 3 (+ 3 (string-width company-common))
-                                 '(face company-echo-common) comp))
-        (setq comp (propertize comp 'face 'company-echo))
-        (add-text-properties 0 (string-width company-common)
-                             '(face company-echo-common) comp))
-      (if (>= len limit)
-          (setq candidates nil)
-        (push comp msg)))
-
-    (mapconcat 'identity (nreverse msg) " ")))
+      (mapconcat 'identity (nreverse msg) " "))))
 
 (defun company-echo-strip-common-format ()
+  (let ((selection (or company-selection 0)))
+    (let ((limit (window-body-width (minibuffer-window)))
+          (len (+ (length company-prefix) 2))
+          ;; Roll to selection.
+          (candidates (nthcdr selection company-candidates))
+          (i (if company-show-numbers selection 99999))
+          msg comp)
 
-  (let ((limit (window-body-width (minibuffer-window)))
-        (len (+ (length company-prefix) 2))
-        ;; Roll to selection.
-        (candidates (nthcdr company-selection company-candidates))
-        (i (if company-show-numbers company-selection 99999))
-        msg comp)
+      (while candidates
+        (setq comp (company-strip-prefix (pop candidates))
+              len (+ len 2 (length comp)))
+        (when (< i 10)
+          ;; Add number.
+          (setq comp (format "%s (%d)" comp i))
+          (cl-incf len 4)
+          (cl-incf i))
+        (if (>= len limit)
+            (setq candidates nil)
+          (push (propertize comp 'face 'company-echo) msg)))
 
-    (while candidates
-      (setq comp (company-strip-prefix (pop candidates))
-            len (+ len 2 (length comp)))
-      (when (< i 10)
-        ;; Add number.
-        (setq comp (format "%s (%d)" comp i))
-        (cl-incf len 4)
-        (cl-incf i))
-      (if (>= len limit)
-          (setq candidates nil)
-        (push (propertize comp 'face 'company-echo) msg)))
-
-    (concat (propertize company-prefix 'face 'company-echo-common) "{"
-            (mapconcat 'identity (nreverse msg) ", ")
-            "}")))
+      (concat (propertize company-prefix 'face 'company-echo-common) "{"
+              (mapconcat 'identity (nreverse msg) ", ")
+              "}"))))
 
 (defun company-echo-hide ()
   (unless (equal company-echo-last-msg "")
