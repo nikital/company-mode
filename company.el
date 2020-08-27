@@ -1194,19 +1194,29 @@ can retrieve meta-data for them."
       (error (error "Company: frontend %s error \"%s\" on command %s"
                     frontend (error-message-string err) command)))))
 
-(defun company--calc-selection (selection)
-  "Calculate the correct selection from passed SELECTION.
-Respect `company-selection-wrap-around'."
-  (when selection
-    (if (and (<= 0 selection) (< selection company-candidates-length))
-        selection
-      (if company-selection-wrap-around
-          (mod selection company-candidates-length)
-        (setq selection (min (1- company-candidates-length) selection))
-        (if (< selection 0) company-selection-default selection)))))
+(defun company--clamp-selection (selection)
+  "Clamp selection to the correct range, respecting
+`company-selection-wrap-around' and `company-selection-default'."
+  (setq selection
+        (cond
+         ;; Selection is in range
+         ((or (not selection)
+              (and (<= 0 selection) (< selection company-candidates-length)))
+          selection)
+         ;; Selection is out of range, and we want to wrap around
+         (company-selection-wrap-around
+          (mod selection (+ company-candidates-length
+                            (if company-selection-default 0 1))))
+         ;; Selection is out of range, and we don't want to wrap around
+         (t
+          (max (if company-selection-default 0 -1) (min (1- company-candidates-length) selection)))
+         ))
+  (if (or (= selection -1) (= selection company-candidates-length))
+      nil ;; If selection is still out of range, we are in unselected state
+    selection))
 
 (defun company-set-selection (selection &optional force-update)
-  (setq selection (company--calc-selection selection))
+  (setq selection (company--clamp-selection selection))
   (when (or force-update (not (equal selection company-selection)))
     (setq company-selection selection
           company-selection-changed t)
@@ -2055,27 +2065,10 @@ followed by `company-search-toggle-filtering'."
 (defun company-select-next (&optional arg)
   "Select the next candidate in the list.
 
-With ARG, move by that many elements.
-
-Possible state transitions:
-- (arg > 0) unselected -> first candidate selected
-- (arg < 0) first candidate selected -> default selection
-- (arg < 0 wrap-round) unselected -> last candidate selected
-- (arg < 0 no wrap-round) unselected -> unselected"
+With ARG, move by that many elements."
   (interactive "p")
   (when (company-manual-begin)
-    (let ((selection (if company-selection
-                         (+ (or arg 1) company-selection)
-                       (+ (or arg 1)
-                          (cond ((or (not arg) (> arg 0)) -1)
-                                (t 0))))))
-      ;; special case
-      (let ((company-selection-wrap-around t))
-        (when (and arg (< arg 0)
-                   (not (equal company-selection company-selection-default))
-                   (equal (company--calc-selection selection) (- company-candidates-length 1)))
-          (setq selection company-selection-default)))
-      (company-set-selection selection))))
+    (company-set-selection (+ (or arg 1) (or company-selection -1)))))
 
 (defun company-select-previous (&optional arg)
   "Select the previous candidate in the list.
